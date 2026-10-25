@@ -1,0 +1,45 @@
+@import "tailwindcss";
+
+@theme inline {
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+
+  --color-brand-50: #eef4ff;
+  --color-brand-100: #dbe6ff;
+  --color-brand-500: #3b6cf6;
+  --color-brand-600: #2852e0;
+  --color-brand-700: #1f40b5;
+  --color-plate-yellow: #f7c600;
+  --color-plate-white: #f8f8f4;
+}
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  background: #f7f8fa;
+  color: #0f172a;
+}
+
+/* UK number plate look-alike (PRD 3.2.2 search box). */
+.plate {
+  font-family: var(--font-plate), ui-sans-serif, system-ui;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+@keyframes fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.animate-in {
+  animation: fade-in-up 180ms ease-out;
+}
