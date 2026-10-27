@@ -8,6 +8,7 @@ import { formatVrm, parseVehicleIdentifier } from "@/lib/vrm";
 import { Alert, Button, Spinner } from "@/components/ui";
 import {
   requestPasswordReset,
+  signInAsDemo,
   signInWithGoogle,
   signInWithPassword,
   signUpWithPassword,
@@ -41,10 +42,24 @@ function useNextParam() {
 
 function GoogleButton({ next }: { next: string }) {
   return (
-    <form action={signInWithGoogle}>
-      <input type="hidden" name="next" value={next} />
-      <GoogleSubmit />
-    </form>
+    <div className="space-y-2.5">
+      <form action={signInWithGoogle}>
+        <input type="hidden" name="next" value={next} />
+        <GoogleSubmit />
+      </form>
+      <form action={signInAsDemo}>
+        <input type="hidden" name="next" value={next} />
+        <Button
+          type="submit"
+          variant="secondary"
+          size="lg"
+          className="w-full flex items-center justify-center gap-2 border-brand-600/30 bg-brand-50/70 text-brand-950 hover:bg-brand-100 font-medium"
+        >
+          <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
+          ⚡ Instant Demo Sign-in (Daniel Dang · 50 Credits)
+        </Button>
+      </form>
+    </div>
   );
 }
 

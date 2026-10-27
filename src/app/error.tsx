@@ -20,21 +20,18 @@ export default function ErrorPage({ error, reset }: { error: Error & { digest?: 
             ? "This local demo was restarted, so the saved session no longer matches the database. Sign out and log in again."
             : misconfigured
               ? "The server is not fully configured yet (see .env.example)."
-              : "Please try again. If a credit was taken for a failed lookup it is refunded automatically."}
+              : "An unexpected error occurred during page rendering or authentication."}
         </p>
         {error.digest && <p className="mt-2 font-mono text-xs text-ink-400">Ref: {error.digest}</p>}
-        <div className="mt-6 flex flex-col justify-center gap-3 sm:flex-row">
-          {staleSession ? (
-            <form action="/auth/signout" method="post">
-              <Button type="submit" className="w-full sm:w-auto">
-                Sign out &amp; reset
-              </Button>
-            </form>
-          ) : (
-            <Button onClick={reset}>Try again</Button>
-          )}
-          <ButtonLink href="/" variant="secondary">
-            Home
+        <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
+          <Button onClick={reset}>Try again</Button>
+          <form action="/auth/signout" method="post" className="inline">
+            <Button type="submit" variant="secondary">
+              Sign out &amp; reset
+            </Button>
+          </form>
+          <ButtonLink href="/login" variant="ghost">
+            Back to log in
           </ButtonLink>
         </div>
       </div>

@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getGoogleClientId, getGoogleClientSecret, isHostedSupabaseConfigured } from "@/lib/oauth-config";
+import { getOrigin } from "@/lib/origin";
 import { safeNextPath } from "@/lib/safe-redirect";
 import { createSessionToken, setSessionCookie } from "@/lib/session";
 import { getStandaloneProfile } from "@/lib/standalone-store";
@@ -7,7 +8,8 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 
 export async function GET(request: NextRequest) {
-  const { searchParams, origin } = request.nextUrl;
+  const { searchParams } = request.nextUrl;
+  const origin = await getOrigin();
   const code = searchParams.get("code");
   const state = searchParams.get("state");
   const next = safeNextPath(state || searchParams.get("next") || "/dashboard");

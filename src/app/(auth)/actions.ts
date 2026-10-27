@@ -1,11 +1,14 @@
 "use server";
 
+import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { z } from "zod";
 import { isSupabaseConfigured } from "@/lib/env";
 import { getGoogleClientId, isHostedSupabaseConfigured } from "@/lib/oauth-config";
 import { getOrigin } from "@/lib/origin";
 import { safeNextPath } from "@/lib/safe-redirect";
+import { createSessionToken, SESSION_COOKIE_NAME } from "@/lib/session";
+import { getStandaloneProfile } from "@/lib/standalone-store";
 import { createClient } from "@/lib/supabase/server";
 
 export type AuthFormState = { error?: string; message?: string; email?: string };
@@ -107,6 +110,27 @@ export async function signInWithGoogle(formData: FormData) {
   if (next) authUrl.searchParams.set("state", next);
 
   redirect(authUrl.toString());
+}
+
+/** 1-Click Instant Demo Login for Daniel Dang (pre-seeded 50 credits) */
+export async function signInAsDemo(formData: FormData) {
+  const next = safeNextPath(String(formData.get("next") ?? "/dashboard"));
+  const user = {
+    id: "usr_daniel_demo",
+    email: "danieldangg12112008@gmail.com",
+    name: "Daniel Dang",
+  };
+  await getStandaloneProfile(user.id, user.email, user.name);
+  const token = await createSessionToken(user);
+  const cookieStore = await cookies();
+  cookieStore.set(SESSION_COOKIE_NAME, token, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    path: "/",
+    maxAge: 60 * 60 * 24 * 30,
+  });
+  redirect(next);
 }
 
 export async function requestPasswordReset(_: AuthFormState, formData: FormData): Promise<AuthFormState> {
