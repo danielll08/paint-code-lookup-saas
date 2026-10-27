@@ -98,12 +98,13 @@ const server = new EmbeddedPostgres({
   password: "postgres",
   port: PG_PORT,
   persistent: false,
+  initdbFlags: ["-E", "UTF8", "--locale=C"],
   onLog: () => {},
 });
 await server.initialise();
 await server.start();
 await server.createDatabase("app");
-const pool = new pg.Pool({ host: "localhost", port: PG_PORT, user: "postgres", password: "postgres", database: "app" });
+const pool = new pg.Pool({ host: "localhost", port: PG_PORT, user: "postgres", password: "postgres", database: "app", client_encoding: "UTF8" });
 
 await pool.query(`
   CREATE ROLE anon NOLOGIN;
