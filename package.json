@@ -11,7 +11,10 @@
     "test": "vitest run",
     "e2e:setup": "node e2e/setup.mjs",
     "test:e2e": "node e2e/run-all.mjs",
-    "demo": "node e2e/run-all.mjs demo"
+    "demo": "node e2e/run-all.mjs demo",
+    "deploy": "node scripts/deploy-all.mjs",
+    "deploy:vercel": "node scripts/deploy-vercel.mjs",
+    "deploy:render": "node scripts/deploy-render.mjs"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.7",

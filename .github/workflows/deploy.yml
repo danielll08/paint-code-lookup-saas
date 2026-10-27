@@ -1,0 +1,45 @@
+name: CI/CD Autonomous Deployment
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Run ESLint
+        run: npm run lint
+
+      - name: Run Vitest Suite
+        run: npm test
+
+      - name: Build Next.js App
+        run: npm run build
+        env:
+          NEXT_PUBLIC_SITE_URL: "https://paint-code-lookup-saas.vercel.app"
+          PAINT_API_PROVIDERS: "mock-primary,mock-backup"
+
+  deploy-render:
+    needs: test-and-build
+    if: env.RENDER_DEPLOY_HOOK_URL != ''
+    runs-on: ubuntu-latest
+    env:
+      RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+    steps:
+      - name: Trigger Render Deploy Hook
+        run: |
+          curl -X POST "$RENDER_DEPLOY_HOOK_URL"
