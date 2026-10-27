@@ -15,6 +15,7 @@ export type TransactionType =
   | "LOOKUP_DEDUCTION"
   | "LOOKUP_REFUND"
   | "ADMIN_ADJUSTMENT";
+export type TopUpPackId = "topup_5" | "topup_10" | "topup_25";
 export type RefundReason = "API_NO_DATA" | "API_ERROR" | "STALE_PENDING";
 
 type UsersRow = {
@@ -28,6 +29,9 @@ type UsersRow = {
   subscription_tier: SubscriptionTier | null;
   stripe_subscription_id: string | null;
   current_period_end: string | null;
+  auto_topup_pack: TopUpPackId | null;
+  auto_topup_attempted_at: string | null;
+  auto_topup_last_error: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -147,6 +151,10 @@ export type Database = {
       expire_subscription_credits: {
         Args: { p_user_id: string; p_description: string };
         Returns: number;
+      };
+      claim_auto_topup: {
+        Args: { p_user_id: string; p_cooldown?: string };
+        Returns: TopUpPackId | null;
       };
     };
     Enums: { [_ in never]: never };

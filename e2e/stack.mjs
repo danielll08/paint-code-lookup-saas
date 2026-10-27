@@ -43,6 +43,24 @@ const KID = "e2e-key-1";
 const publicJwk = { ...publicKey.export({ format: "jwk" }), kid: KID, alg: "ES256", use: "sig", key_ops: ["verify"] };
 const JWKS = { keys: [publicJwk] };
 
+function getGoogleOAuthCredentials() {
+  let clientId = process.env.SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_ID;
+  let clientSecret = process.env.SUPABASE_AUTH_EXTERNAL_GOOGLE_SECRET;
+  if (!clientId || !clientSecret) {
+    const envPath = path.join(PROJECT, ".env.local");
+    if (fs.existsSync(envPath)) {
+      const content = fs.readFileSync(envPath, "utf8");
+      for (const line of content.split("\n")) {
+        const mId = line.match(/^SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_ID\s*=\s*(.*)$/);
+        if (mId) clientId = mId[1].trim().replace(/^['"]|['"]$/g, "");
+        const mSec = line.match(/^SUPABASE_AUTH_EXTERNAL_GOOGLE_SECRET\s*=\s*(.*)$/);
+        if (mSec) clientSecret = mSec[1].trim().replace(/^['"]|['"]$/g, "");
+      }
+    }
+  }
+  return { clientId, clientSecret };
+}
+
 const b64url = (buf) => Buffer.from(buf).toString("base64url");
 function signJwt(payload) {
   const header = b64url(JSON.stringify({ alg: "ES256", typ: "JWT", kid: KID }));
@@ -277,12 +295,78 @@ async function handleAuth(req, res, url, body) {
   }
 
   if (route === "/authorize" && req.method === "GET") {
+    const { clientId, clientSecret } = getGoogleOAuthCredentials();
+    const isGoogle = url.searchParams.get("provider") === "google";
+    if (clientId && clientSecret && isGoogle && APP_PORT === 3000) {
+      const state = Buffer.from(
+        JSON.stringify({
+          redirect_to: url.searchParams.get("redirect_to"),
+          code_challenge: url.searchParams.get("code_challenge"),
+        })
+      ).toString("base64url");
+      const googleAuthUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+      googleAuthUrl.searchParams.set("client_id", clientId);
+      googleAuthUrl.searchParams.set("redirect_uri", `${SUPABASE_URL}/auth/v1/callback`);
+      googleAuthUrl.searchParams.set("response_type", "code");
+      googleAuthUrl.searchParams.set("scope", "openid email profile");
+      googleAuthUrl.searchParams.set("state", state);
+      googleAuthUrl.searchParams.set("access_type", "offline");
+      googleAuthUrl.searchParams.set("prompt", "select_account");
+      res.writeHead(302, { Location: googleAuthUrl.toString() });
+      return res.end();
+    }
+
     // Emulates the Google consent screen accepting immediately.
     const email = "google.user@gmail.test";
     const u = users.get(email) ?? (await createUser(email, null, { full_name: "Google User" }, "google", true));
     const code = issueCode(u.id, url.searchParams.get("code_challenge"));
     res.writeHead(302, { Location: withCode(url.searchParams.get("redirect_to"), code) });
     return res.end();
+  }
+
+  if (route === "/callback" && req.method === "GET") {
+    const code = url.searchParams.get("code");
+    const rawState = url.searchParams.get("state");
+    let state = {};
+    try {
+      state = JSON.parse(Buffer.from(rawState, "base64url").toString());
+    } catch {}
+
+    const { clientId, clientSecret } = getGoogleOAuthCredentials();
+    if (code && clientId && clientSecret) {
+      try {
+        const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            code,
+            client_id: clientId,
+            client_secret: clientSecret,
+            redirect_uri: `${SUPABASE_URL}/auth/v1/callback`,
+            grant_type: "authorization_code",
+          }),
+        });
+        const tokenData = await tokenRes.json();
+        if (tokenData.id_token) {
+          const userinfo = JSON.parse(Buffer.from(tokenData.id_token.split(".")[1], "base64url").toString());
+          if (userinfo?.email) {
+            const email = userinfo.email;
+            const fullName = userinfo.name ?? userinfo.email.split("@")[0];
+            const u = users.get(email) ?? (await createUser(email, null, { full_name: fullName }, "google", true));
+            const authCode = issueCode(u.id, state.code_challenge);
+            res.writeHead(302, { Location: withCode(state.redirect_to, authCode) });
+            return res.end();
+          }
+        }
+      } catch (err) {
+        console.error("[stack] Google OAuth callback error:", err);
+      }
+    }
+    if (state.redirect_to) {
+      res.writeHead(302, { Location: `${state.redirect_to}${state.redirect_to.includes("?") ? "&" : "?"}error=Google+sign-in+failed` });
+      return res.end();
+    }
+    return send(res, 400, { error: "oauth_callback_failed" });
   }
 
   if (route === "/token" && req.method === "POST") {

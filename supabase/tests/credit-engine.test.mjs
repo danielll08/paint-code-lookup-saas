@@ -75,6 +75,20 @@ async function deduct(userId, vrm, client = pool) {
   return rows[0].id;
 }
 
+/** Run fn as a signed-in client (role authenticated + JWT sub), rolled back afterwards. */
+async function asUser(userId, fn) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SET LOCAL ROLE authenticated");
+    await client.query("SELECT set_config('request.jwt.claim.sub', $1, true)", [userId]);
+    return await fn(client);
+  } finally {
+    await client.query("ROLLBACK");
+    client.release();
+  }
+}
+
 async function ledgerSum(userId) {
   const { rows } = await pool.query(
     "SELECT COALESCE(SUM(amount), 0)::int AS total FROM public.credit_transactions WHERE user_id = $1",
@@ -315,19 +329,6 @@ describe("Stripe idempotency & subscription buckets", () => {
 });
 
 describe("row level security", () => {
-  async function asUser(userId, fn) {
-    const client = await pool.connect();
-    try {
-      await client.query("BEGIN");
-      await client.query("SET LOCAL ROLE authenticated");
-      await client.query("SELECT set_config('request.jwt.claim.sub', $1, true)", [userId]);
-      return await fn(client);
-    } finally {
-      await client.query("ROLLBACK");
-      client.release();
-    }
-  }
-
   test("a user sees only their own rows and cannot write balances or call RPCs", async () => {
     const alice = await createUser();
     const bob = await createUser();
@@ -361,5 +362,46 @@ describe("row level security", () => {
 
     assert.equal((await balanceOf(alice)).credit_balance, 3);
     assert.equal((await balanceOf(bob)).credit_balance, 7);
+  });
+});
+
+describe("auto top-up claim", () => {
+  async function optIn(userId, pack = "topup_10") {
+    await pool.query(
+      "UPDATE public.users SET auto_topup_pack = $2, stripe_customer_id = $3 WHERE id = $1",
+      [userId, pack, `cus_${randomUUID()}`],
+    );
+  }
+  const claim = (userId) =>
+    pool.query("SELECT public.claim_auto_topup($1) AS pack", [userId]).then((r) => r.rows[0].pack);
+
+  test("returns nothing while the user has credits or has not opted in", async () => {
+    const user = await createUser();
+    assert.equal(await claim(user), null); // not opted in
+    await optIn(user);
+    await topUp(user, 1);
+    assert.equal(await claim(user), null); // still has a credit
+  });
+
+  test("20 concurrent claims at 0 credits start exactly one charge", async () => {
+    const user = await createUser();
+    await optIn(user, "topup_25");
+    const packs = await Promise.all(Array.from({ length: 20 }, () => claim(user)));
+    assert.deepEqual(packs.filter(Boolean), ["topup_25"]);
+    assert.equal(await claim(user), null); // cooldown
+
+    await pool.query("UPDATE public.users SET auto_topup_attempted_at = NOW() - INTERVAL '11 minutes' WHERE id = $1", [user]);
+    assert.equal(await claim(user), "topup_25"); // after the cooldown it may try again
+  });
+
+  test("rejects an unknown pack and is not callable by clients", async () => {
+    const user = await createUser();
+    await assert.rejects(
+      pool.query("UPDATE public.users SET auto_topup_pack = 'topup_9999' WHERE id = $1", [user]),
+      /check constraint/,
+    );
+    await asUser(user, async (client) => {
+      await assert.rejects(client.query("SELECT public.claim_auto_topup($1)", [user]), /permission denied/);
+    });
   });
 });

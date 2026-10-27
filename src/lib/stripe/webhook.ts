@@ -5,6 +5,7 @@ import type { SubscriptionStatus } from "@/lib/database.types";
 import { subscriptionCreditRollover } from "@/lib/env";
 import { getTopUpPack } from "@/lib/plans";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { AUTO_TOPUP_KIND } from "./auto-topup";
 import { getStripe, planForSubscription, subscriptionPeriodEnd, topUpForPrice } from "./server";
 
 function idOf(value: string | { id: string } | null | undefined): string | null {
@@ -74,6 +75,32 @@ async function handleCheckoutSession(event: Stripe.Event, session: Stripe.Checko
     p_description: `Top-up: +${pack.credits} credits`,
   });
   if (error) throw new Error(`grant_credits failed: ${error.message}`);
+}
+
+// --- payment_intent.*: automatic (off-session) top-ups ----------------------
+async function handleAutoTopUpIntent(event: Stripe.Event, intent: Stripe.PaymentIntent, succeeded: boolean) {
+  // Checkout top-ups are credited by checkout.session.completed; only auto top-ups here.
+  if (intent.metadata?.kind !== AUTO_TOPUP_KIND) return;
+  const userId = await resolveUserId(intent.metadata.user_id, idOf(intent.customer));
+  if (!userId) throw new Error(`No user for payment intent ${intent.id}`);
+  const admin = createAdminClient();
+
+  if (!succeeded) {
+    await admin.from("users").update({ auto_topup_last_error: "Your card was declined for the automatic top-up." }).eq("id", userId);
+    return;
+  }
+
+  const pack = getTopUpPack(intent.metadata.item_id);
+  if (!pack) throw new Error(`Unknown top-up pack for payment intent ${intent.id}`);
+  const { error } = await admin.rpc("grant_credits", {
+    p_user_id: userId,
+    p_amount: pack.credits,
+    p_type: "TOPUP_PURCHASE",
+    p_stripe_event_id: event.id,
+    p_description: `Automatic top-up: +${pack.credits} credits`,
+  });
+  if (error) throw new Error(`grant_credits failed: ${error.message}`);
+  await admin.from("users").update({ auto_topup_last_error: null }).eq("id", userId);
 }
 
 // --- invoice.paid: monthly allowance ----------------------------------------
@@ -161,6 +188,8 @@ export const HANDLED_EVENTS = [
   "customer.subscription.created",
   "customer.subscription.updated",
   "customer.subscription.deleted",
+  "payment_intent.succeeded",
+  "payment_intent.payment_failed",
 ] as const;
 
 /** Every handler is idempotent, so Stripe retries are always safe. */
@@ -178,6 +207,10 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<void> {
       return handleSubscriptionChange(event.data.object, false);
     case "customer.subscription.deleted":
       return handleSubscriptionChange(event.data.object, true);
+    case "payment_intent.succeeded":
+      return handleAutoTopUpIntent(event, event.data.object, true);
+    case "payment_intent.payment_failed":
+      return handleAutoTopUpIntent(event, event.data.object, false);
     default:
       return;
   }

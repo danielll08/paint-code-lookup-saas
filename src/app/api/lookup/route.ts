@@ -1,8 +1,9 @@
-import { NextResponse, type NextRequest } from "next/server";
+import { after, NextResponse, type NextRequest } from "next/server";
 import { z } from "zod";
 import { getSessionUser } from "@/lib/auth";
 import { performLookup } from "@/lib/lookup/service";
 import type { LookupApiResponse } from "@/lib/lookup/types";
+import { maybeAutoTopUp } from "@/lib/stripe/auto-topup";
 
 const bodySchema = z.object({ vrm: z.string().min(1).max(40) });
 
@@ -19,6 +20,10 @@ export async function POST(request: NextRequest) {
 
   try {
     const { httpStatus, body } = await performLookup(user.id, parsed.data.vrm);
+    // Out of credits: charge the opted-in auto top-up after the response is sent.
+    if ("balance" in body && body.balance === 0) {
+      after(() => maybeAutoTopUp(user.id).catch((err) => console.error("[auto-topup]", err)));
+    }
     return json(body, httpStatus);
   } catch (error) {
     console.error("[api/lookup]", error);

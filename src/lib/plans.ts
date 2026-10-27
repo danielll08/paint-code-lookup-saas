@@ -1,6 +1,6 @@
 // Public pricing catalogue (safe for the browser). Prices are placeholders until
 // the client confirms the tiers (PRD 7.1); Stripe Price IDs live in env vars.
-import type { SubscriptionTier } from "@/lib/database.types";
+import type { SubscriptionTier, TopUpPackId } from "@/lib/database.types";
 
 export type SubscriptionPlan = {
   id: SubscriptionTier;
@@ -12,7 +12,7 @@ export type SubscriptionPlan = {
 };
 
 export type TopUpPack = {
-  id: "topup_5" | "topup_10" | "topup_25";
+  id: TopUpPackId;
   credits: number;
   unitAmount: number;
 };

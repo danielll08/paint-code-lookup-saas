@@ -261,6 +261,18 @@ await step("Abuse protection: rate limit + double clicks (PRD 2.3 step 2-3)", as
   check("Invalid plate -> 400", invalid === 400);
   const ledgerOk = await sql("SELECT (SELECT credit_balance FROM public.users WHERE id = $1) AS bal, (SELECT COALESCE(SUM(amount),0)::int FROM public.credit_transactions WHERE user_id = $1) AS sum", [userId]);
   check("Ledger sum == balance (no leakage)", ledgerOk[0].bal === ledgerOk[0].sum, JSON.stringify(ledgerOk[0]));
+
+  // Invalid bodies never reach the database: the route answers 400, so any 429 here came from proxy.ts.
+  await wait(1100);
+  const flood = await page.evaluate(async () => {
+    const call = () => fetch("/api/lookup", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ vrm: "!!" }) });
+    return Promise.all(Array.from({ length: 10 }, async () => {
+      const r = await call();
+      return { status: r.status, retryAfter: r.headers.get("retry-after") };
+    }));
+  });
+  check("Proxy (edge) blocks floods: 10 in 1 s -> 5 reach the route, 5 x 429", flood.filter((r) => r.status === 400).length === 5 && flood.filter((r) => r.status === 429).length === 5, flood.map((r) => r.status).join(","));
+  check("...429 from the proxy carries Retry-After", flood.filter((r) => r.status === 429).every((r) => r.retryAfter === "1"));
 });
 
 await step("Recent lookups table (PRD 3.2.2)", async () => {
@@ -280,7 +292,7 @@ await step("Billing page (PRD 3.2.3)", async () => {
   await page.goto("/dashboard/billing");
   await page.locator("text=Credit history").waitFor();
   check("Shows pay-as-you-go when no plan", await page.locator("text=Pay as you go").first().isVisible());
-  const ledgerText = await page.locator("table").last().innerText();
+  const ledgerText = await page.getByRole("table").filter({ hasText: "Balance" }).innerText();
   check("Ledger shows top-up, lookup and refund", ["Top-up purchase", "Lookup", "Refund"].every((t) => ledgerText.includes(t)));
   check("Quick top-up buttons 5/10/25", await page.locator("text=Pay as you go").first().isVisible());
   await page.screenshot({ path: path.join(shots, "03-billing.png"), fullPage: true });
@@ -365,6 +377,65 @@ await step("Stale PENDING safety net (cron)", async () => {
   const res = await fetch(`${APP}/api/cron/refund-stale`, { headers: { Authorization: `Bearer ${env.CRON_SECRET}` } });
   const body = await res.json();
   check("Cron refunds a lookup stuck in PENDING", res.status === 200 && body.refunded === 1 && (await profile(EMAIL)).credit_balance === before, JSON.stringify(body));
+});
+
+await step("Automatic top-up when credits run out (PRD 1, business customers)", async () => {
+  await page.goto("/dashboard/billing");
+  check("Billing shows 'Automatic top-up', off by default", (await appears("text=Automatic top-up")) && (await page.getByTestId("auto-topup-status").innerText()) === "Off.");
+  await page.selectOption("#auto-topup-pack", "topup_5");
+  await page.click("form:has(#auto-topup-pack) button:has-text('Save')");
+  await page.waitForURL(/auto_topup=on/);
+  check("Saving shows a confirmation", await appears("text=Automatic top-up is on."));
+  check("Status shows the chosen pack", /On: 5 credits for £5\.99/.test(await page.getByTestId("auto-topup-status").innerText()));
+  check("Stored on the profile", (await profile(EMAIL)).auto_topup_pack === "topup_5");
+
+  // Spend everything but one credit, then use the last one through the UI.
+  const left = (await profile(EMAIL)).credit_balance;
+  if (left > 1) {
+    await sql(
+      "SELECT public.complete_lookup(public.deduct_credit_for_lookup($1, 'AT' || g || 'XYZ', 'mock-primary'), 'mock-primary', 'LY9T', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL) FROM generate_series(1, $2) g",
+      [userId, left - 1],
+    );
+  }
+  await page.goto("/dashboard");
+  await wait(1100);
+  await lookup("AZ12ZZZ");
+  check("Last credit used -> badge 0", /0 Credits/.test(await badge()), await badge());
+  let p;
+  for (let i = 0; i < 20 && !(p = await profile(EMAIL)).auto_topup_attempted_at; i++) await wait(250);
+  check("Balance 0 -> off-session charge started (after the response)", Boolean(p.auto_topup_attempted_at) && !p.auto_topup_last_error, p.auto_topup_last_error ?? "");
+  check("...but no credits until Stripe confirms", p.credit_balance === 0);
+
+  await wait(1100);
+  const lookupAt0 = await page.evaluate(() => fetch("/api/lookup", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ vrm: "AZ13ZZZ" }) }).then((r) => r.status));
+  await wait(500);
+  check("Second attempt at 0 credits: 402 and no second charge (cooldown)", lookupAt0 === 402 && (await profile(EMAIL)).auto_topup_attempted_at === p.auto_topup_attempted_at);
+
+  const intent = { id: "pi_auto_e2e_1", object: "payment_intent", customer: p.stripe_customer_id, status: "succeeded", metadata: { user_id: userId, kind: "auto_topup", item_id: "topup_5" } };
+  const manual = await webhook("payment_intent.succeeded", { ...intent, id: "pi_checkout_e2e", metadata: { ...intent.metadata, kind: "topup" } });
+  check("Checkout payment intents are ignored (credited by checkout.session.completed)", manual.status === 200 && (await profile(EMAIL)).credit_balance === 0);
+  const ok = await webhook("payment_intent.succeeded", intent, { id: "evt_auto_topup_1" });
+  check("payment_intent.succeeded -> +5 credits", ok.status === 200 && (await profile(EMAIL)).credit_balance === 5);
+  await webhook("payment_intent.succeeded", intent, { id: "evt_auto_topup_1" });
+  check("Replayed auto top-up event does NOT double credit", (await profile(EMAIL)).credit_balance === 5);
+
+  // No Realtime in the local stack: the badge's focus refresh must pick the new balance up.
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await page.waitForFunction(() => /5 Credits/.test(document.querySelector("[aria-live=polite]")?.textContent ?? ""), null, { timeout: 5_000 }).catch(() => {});
+  check("Badge refreshes on window focus without Realtime", /5 Credits/.test(await badge()), await badge());
+
+  await webhook("payment_intent.payment_failed", { ...intent, id: "pi_auto_e2e_2", status: "requires_payment_method" });
+  await page.goto("/dashboard/billing");
+  check("Declined auto top-up shows an error on billing", await appears("text=Your card was declined for the automatic top-up."));
+  const ledger = await page.getByRole("table").filter({ hasText: "Balance" }).innerText();
+  check("Ledger lists 'Automatic top-up: +5 credits'", ledger.includes("Automatic top-up: +5 credits"));
+
+  await page.selectOption("#auto-topup-pack", "");
+  await page.click("form:has(#auto-topup-pack) button:has-text('Save')");
+  await page.waitForURL(/auto_topup=off/);
+  check("Can turn it off again", (await profile(EMAIL)).auto_topup_pack === null && (await page.getByTestId("auto-topup-status").innerText()) === "Off.");
+  const sums = await sql("SELECT (SELECT credit_balance FROM public.users WHERE id = $1) AS bal, (SELECT COALESCE(SUM(amount),0)::int FROM public.credit_transactions WHERE user_id = $1) AS sum", [userId]);
+  check("Ledger sum == balance after auto top-up", sums[0].bal === sums[0].sum, JSON.stringify(sums[0]));
 });
 
 await step("Row Level Security via the public API", async () => {

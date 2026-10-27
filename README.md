@@ -15,6 +15,8 @@ stripe listen --forward-to localhost:3000/api/webhooks/stripe   # copy the whsec
 npm run dev
 ```
 
+For a deployed site, add a Stripe webhook endpoint at `<site>/api/webhooks/stripe` with these events: `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `invoice.paid`, `invoice.payment_failed`, `customer.subscription.created|updated|deleted`, `payment_intent.succeeded` and `payment_intent.payment_failed`.
+
 For a hosted Supabase project, run `npx supabase link` and then `npx supabase db push`. In the dashboard, turn on **Confirm email** and the **Google** provider, and add `<site>/auth/callback` to the allowed redirect URLs.
 
 ### Try it without any Supabase/Stripe account
@@ -36,19 +38,21 @@ Sign-up confirmation emails are shown at `http://127.0.0.1:55400/__test/mail`. A
 
 | Script | What it checks |
 | --- | --- |
-| `npm run test:db` | Runs the migration on a **real embedded PostgreSQL** and tests race conditions, the CHECK constraints, refunds, webhook idempotency and RLS |
+| `npm run test:db` | Runs the migration on a **real embedded PostgreSQL** and tests race conditions, the CHECK constraints, refunds, webhook idempotency, RLS and the auto top-up lock (17 tests) |
 | `npm test` | Vitest: VRM parsing, adapters/failover, the lookup + refund flow, Stripe signature checks |
-| `npm run test:e2e` | Builds the app and drives it in Chromium against the local stack. Covers every PRD flow (115 checks): sign-up and email verification, Google, password reset, lookups, refunds, failover, rate limiting, signed webhooks, the subscription lifecycle, RLS and mobile layout. Screenshots are saved to `e2e/.output/` |
+| `npm run test:e2e` | Builds the app and drives it in Chromium against the local stack. Covers every PRD flow (133 checks): sign-up and email verification, Google, password reset, lookups, refunds, failover, rate limiting (route and proxy), signed webhooks, the subscription lifecycle, automatic top-up, the badge refresh, RLS and mobile layout. Screenshots are saved to `e2e/.output/` |
 | `npm run lint` / `npm run build` | ESLint and the production build |
 
 ## Architecture
 
 ```
-src/proxy.ts                      Routing: signed in + "/" -> 307 /dashboard; signed out + /dashboard -> /login
+src/proxy.ts                      Routing: signed in + "/" -> 307 /dashboard; signed out + /dashboard -> /login;
+                                  burst guard: > 5 POST /api/lookup per second -> 429 before any database work
 supabase/migrations/*.sql         Schema, CHECK (>= 0), SELECT ... FOR UPDATE functions, RLS
 src/lib/lookup/service.ts         Core flow (PRD 2.3): cache -> rate limit -> deduct -> provider -> complete | refund
 src/lib/paint-api/                Adapter Pattern: types, failover chain, mock + HTTP template providers
-src/lib/stripe/webhook.ts         Idempotent handlers (checkout, invoice.paid / payment_failed, subscription.*)
+src/lib/stripe/webhook.ts         Idempotent handlers (checkout, invoice.paid / payment_failed, subscription.*, payment_intent.*)
+src/lib/stripe/auto-topup.ts      Off-session top-up charge when an opted-in user reaches 0 credits
 src/app/api/webhooks/stripe       The only place credits are added after a payment (signature verified)
 src/app/dashboard                 Search box, result card, history, billing + ledger
 ```
@@ -63,6 +67,12 @@ src/app/dashboard                 Search box, result card, history, billing + le
 
 ### Credit buckets & rollover
 `subscription_credits` is the part of the balance that comes from the monthly plan and is spent first. Top-up credits (`credit_balance - subscription_credits`) **never expire**. With `SUBSCRIPTION_CREDIT_ROLLOVER=false` (the default), unused plan credits expire at renewal and when the subscription is cancelled.
+
+### Automatic top-up
+On `/dashboard/billing` a user can pick a pack (or Off). When a lookup leaves the balance at 0, the lookup route schedules `maybeAutoTopUp` with `after()`, so the response is not delayed. `claim_auto_topup` locks the user row and allows at most one charge every 10 minutes. The charge is an off-session PaymentIntent on the card saved on the Stripe customer (from the subscription, or from a top-up bought while auto top-up is on). Credits are still added only by the `payment_intent.succeeded` webhook, idempotent on the event id. A declined card shows a message on the billing page.
+
+### Credit badge
+The badge listens to Supabase Realtime on the user's row. It also re-reads the balance when the tab regains focus and every 30 s, in case the websocket is blocked or an event is missed.
 
 ### Adding a real provider (Milestone 3)
 Copy `src/lib/paint-api/providers/http-template.ts`, map the provider's JSON to `StandardizedVehiclePaintData`, add one line to the `REGISTRY` in `src/lib/paint-api/index.ts`, then set `PAINT_API_PROVIDERS=new-provider,mock-backup`. No UI or billing code needs to change.

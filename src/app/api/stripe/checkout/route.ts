@@ -55,13 +55,17 @@ export async function POST(request: NextRequest) {
       const pack = getTopUpPack(itemId);
       if (!pack) return NextResponse.redirect(`${origin}/dashboard/billing?error=unknown_pack`, 303);
 
+      // With auto top-up on, keep the card so later top-ups can be charged off-session.
+      const { data: profile } = await createAdminClient().from("users").select("auto_topup_pack").eq("id", user.id).single();
+      const saveCard = Boolean(profile?.auto_topup_pack);
+
       const session = await stripe.checkout.sessions.create({
         mode: "payment",
         customer,
         client_reference_id: user.id,
         line_items: [topUpLineItem(pack)],
         metadata,
-        payment_intent_data: { metadata },
+        payment_intent_data: { metadata, ...(saveCard && { setup_future_usage: "off_session" as const }) },
         invoice_creation: { enabled: true },
         success_url: `${origin}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
         cancel_url: `${origin}/dashboard/billing?canceled=1`,

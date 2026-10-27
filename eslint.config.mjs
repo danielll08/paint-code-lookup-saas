@@ -15,6 +15,8 @@ const eslintConfig = defineConfig([
     // e2e harness output
     ".next-e2e/**",
     "e2e/.output/**",
+    // agent configurations & skills
+    ".agents/**",
   ]),
 ]);
 
