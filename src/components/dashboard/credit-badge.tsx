@@ -31,6 +31,12 @@ export function CreditBadge({ userId, initialBalance }: { userId: string; initia
     window.addEventListener(CREDITS_EVENT, onAnnounce);
 
     const supabase = createClient();
+    if (!supabase) {
+      return () => {
+        window.removeEventListener(CREDITS_EVENT, onAnnounce);
+      };
+    }
+
     const channel = supabase
       .channel(`credits:${userId}`)
       .on(
@@ -65,29 +71,30 @@ export function CreditBadge({ userId, initialBalance }: { userId: string; initia
   }, [userId]);
 
   return (
-    <span
+    <div
+      aria-label={`${balance} credit${balance === 1 ? "" : "s"} remaining`}
       className={cn(
-        "inline-flex items-center gap-1.5 whitespace-nowrap rounded-[2px] border py-1 pl-1 pr-2.5 text-xs font-semibold transition-all duration-300",
-        balance > 0 ? "border-ink-950/20 bg-white text-ink-950" : "border-brand-600 bg-brand-600 text-white",
-        flash && "ring-2 ring-brand-600/15",
+        "inline-flex items-center gap-2 rounded-full border border-slate-700/60 bg-slate-900/60 px-3.5 py-1.5 text-xs font-medium text-slate-200 shadow-inner backdrop-blur transition-all duration-300",
+        flash && "border-amber-400/80 bg-amber-500/20 text-amber-100 ring-2 ring-amber-400/30",
       )}
-      aria-live="polite"
     >
-      <span
-        className={cn(
-          "grid h-5 w-5 place-items-center",
-          balance > 0 ? "bg-brand-600 text-white" : "bg-white/15 text-white",
-        )}
-        aria-hidden
-      >
-        <svg viewBox="0 0 24 24" className="h-3 w-3" fill="currentColor">
-          <path d="M13 2 4.5 13.5H11L9.5 22 19 10h-6.5L13 2Z" />
-        </svg>
+      <span className="relative flex h-2 w-2">
+        <span
+          className={cn(
+            "absolute inline-flex h-full w-full rounded-full opacity-75",
+            balance > 0 ? "animate-ping bg-emerald-400" : "bg-rose-400",
+          )}
+        />
+        <span
+          className={cn(
+            "relative inline-flex h-2 w-2 rounded-full",
+            balance > 0 ? "bg-emerald-500" : "bg-rose-500",
+          )}
+        />
       </span>
       <span>
-        {balance} {balance === 1 ? "Credit" : "Credits"}
-        <span className="hidden font-medium opacity-70 sm:inline"> remaining</span>
+        <strong className="font-semibold text-white">{balance}</strong> {balance === 1 ? "credit" : "credits"}
       </span>
-    </span>
+    </div>
   );
 }

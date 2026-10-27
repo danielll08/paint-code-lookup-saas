@@ -4,6 +4,13 @@ import type { Json, VehicleLookup } from "@/lib/database.types";
 import { paintApiTimeoutMs } from "@/lib/env";
 import { getPaintProviders, lookupWithFailover, type FailoverResult } from "@/lib/paint-api";
 import { checkLookupRateLimit } from "@/lib/rate-limit";
+import {
+  deductStandaloneCredit,
+  getStandaloneLookups,
+  getStandaloneProfile,
+  refundStandaloneCredit,
+  saveStandaloneLookup,
+} from "@/lib/standalone-store";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { maskVin, parseVehicleIdentifier } from "@/lib/vrm";
 import { toLookupView, type LookupApiResponse } from "./types";
@@ -79,8 +86,126 @@ export async function performLookup(userId: string, rawInput: string): Promise<H
     };
   }
   const vrm = identifier.value;
-  const admin = createAdminClient();
 
+  // Safe detection of Supabase vs Standalone mode
+  let admin: ReturnType<typeof createAdminClient> | null = null;
+  try {
+    admin = createAdminClient();
+  } catch (err: unknown) {
+    if (err instanceof Error && err.name !== "MissingEnvError") {
+      throw err;
+    }
+  }
+
+  // --- Autonomous Standalone Mode (Zero-Config Vercel Deployment) ---
+  if (!admin) {
+    // 1. Standalone cache check
+    const lookups = await getStandaloneLookups(userId);
+    const existing = lookups.find((l) => l.vrm_normalized === vrm && l.status === "SUCCESS");
+    const profile = await getStandaloneProfile(userId, null);
+    if (existing) {
+      return cachedResponse(existing, profile.credit_balance);
+    }
+
+    // 2. Rate limit
+    const rate = await checkLookupRateLimit(userId);
+    if (!rate.allowed) {
+      return {
+        httpStatus: 429,
+        body: { status: "rate_limited", retryAfterMs: rate.retryAfterMs, message: "Too many requests. Please wait a second." },
+      };
+    }
+
+    // 3. Deduction
+    const deduct = await deductStandaloneCredit(userId);
+    if (!deduct.success) {
+      return {
+        httpStatus: 402,
+        body: {
+          status: "insufficient_credits",
+          balance: deduct.balance,
+          message: "You have no credits left. Buy more credits to continue.",
+        },
+      };
+    }
+
+    // 4. Provider call
+    const providers = getPaintProviders();
+    const result = await lookupWithFailover(providers, vrm, paintApiTimeoutMs());
+
+    if (result.outcome === "SUCCESS") {
+      const { data } = result;
+      const completed = await saveStandaloneLookup(userId, {
+        user_id: userId,
+        vrm_normalized: vrm,
+        api_provider: data.providerName,
+        status: "SUCCESS",
+        paint_code: data.paintCode!,
+        paint_name: data.paintDescription ?? null,
+        paint_finish: data.paintFinish ?? null,
+        code_location_hint: data.codeLocationHint ?? null,
+        vehicle_make: data.make || null,
+        vehicle_model: data.model || null,
+        vehicle_year: data.year || null,
+        registered_color: data.registeredColor || null,
+        vin_partial: maskVin(data.vin),
+        raw_api_response: { data, attempts: result.attempts } as unknown as Json,
+        failure_reason: null,
+        cost_credits: 1,
+        deducted_bucket: "SUBSCRIPTION",
+        completed_at: new Date().toISOString(),
+      });
+
+      return {
+        httpStatus: 200,
+        body: { status: "success", charged: true, cached: false, lookup: toLookupView(completed), balance: deduct.balance },
+      };
+    }
+
+    if (result.outcome === "NO_DATA") {
+      const balance = await refundStandaloneCredit(userId);
+      return {
+        httpStatus: 200,
+        body: {
+          status: "no_paint_code",
+          charged: false,
+          lookup: {
+            id: `vlk_nodata_${Date.now()}`,
+            vrm,
+            provider: result.data?.providerName ?? "unknown",
+            status: "NOT_FOUND_REFUNDED",
+            paintCode: null,
+            paintName: null,
+            paintFinish: null,
+            codeLocationHint: null,
+            make: result.data?.make || null,
+            model: result.data?.model || null,
+            year: result.data?.year || null,
+            registeredColor: result.data?.registeredColor || null,
+            vinPartial: maskVin(result.data?.vin),
+            createdAt: new Date().toISOString(),
+          },
+          balance,
+          message: result.data
+            ? "We found the vehicle, but the paint code is not available from our data sources yet. You have not been charged."
+            : "No paint code found for this registration. You have not been charged.",
+        },
+      };
+    }
+
+    const balance = await refundStandaloneCredit(userId);
+    return {
+      httpStatus: 502,
+      body: {
+        status: "provider_error",
+        charged: false,
+        balance,
+        message: "Our vehicle data provider is not responding. You have not been charged - please try again shortly.",
+      },
+    };
+  }
+
+  // --- Database Mode (Supabase Connected) ---
   // 1. Cache / history: same user, same plate, last 30 days -> no credit, no API cost.
   const cached = await findCachedLookup(userId, vrm);
   if (cached) return cachedResponse(cached, await currentBalance(userId));

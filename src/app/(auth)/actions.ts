@@ -2,6 +2,8 @@
 
 import { redirect } from "next/navigation";
 import { z } from "zod";
+import { isSupabaseConfigured } from "@/lib/env";
+import { getGoogleClientId, isHostedSupabaseConfigured } from "@/lib/oauth-config";
 import { getOrigin } from "@/lib/origin";
 import { safeNextPath } from "@/lib/safe-redirect";
 import { createClient } from "@/lib/supabase/server";
@@ -22,6 +24,10 @@ export async function signInWithPassword(_: AuthFormState, formData: FormData): 
   const parsed = credentials.safeParse({ email, password: formData.get("password") });
   if (!parsed.success) return { error: firstIssue(parsed.error), email };
 
+  if (!isSupabaseConfigured()) {
+    return { error: "Password authentication is disabled. Please click 'Continue with Google'.", email };
+  }
+
   const supabase = await createClient();
   const { error } = await supabase.auth.signInWithPassword(parsed.data);
   if (error) {
@@ -37,6 +43,10 @@ export async function signUpWithPassword(_: AuthFormState, formData: FormData): 
   const email = String(formData.get("email") ?? "");
   const parsed = credentials.safeParse({ email, password: formData.get("password") });
   if (!parsed.success) return { error: firstIssue(parsed.error), email };
+
+  if (!isSupabaseConfigured()) {
+    return { error: "Password registration is disabled. Please click 'Continue with Google'.", email };
+  }
 
   const fullName = String(formData.get("full_name") ?? "").trim().slice(0, 120);
   const next = safeNextPath(String(formData.get("next") ?? ""));
@@ -62,25 +72,51 @@ export async function signUpWithPassword(_: AuthFormState, formData: FormData): 
 export async function signInWithGoogle(formData: FormData) {
   const next = safeNextPath(String(formData.get("next") ?? ""));
   const origin = await getOrigin();
-  const supabase = await createClient();
-  const { data, error } = await supabase.auth.signInWithOAuth({
-    provider: "google",
-    options: {
-      redirectTo: `${origin}/auth/callback?next=${encodeURIComponent(next)}`,
-      queryParams: {
-        access_type: "offline",
-        prompt: "select_account",
-      },
-    },
-  });
-  if (error || !data.url) redirect(`/login?error=${encodeURIComponent(error?.message ?? "Google sign-in failed")}`);
-  redirect(data.url);
+
+  // If hosted Supabase is configured, attempt Supabase OAuth first
+  if (isHostedSupabaseConfigured()) {
+    try {
+      const supabase = await createClient();
+      const { data, error } = await supabase.auth.signInWithOAuth({
+        provider: "google",
+        options: {
+          redirectTo: `${origin}/auth/callback?next=${encodeURIComponent(next)}`,
+          queryParams: {
+            access_type: "offline",
+            prompt: "select_account",
+          },
+        },
+      });
+      if (!error && data?.url) {
+        redirect(data.url);
+      }
+    } catch (err) {
+      console.warn("[signInWithGoogle] Supabase OAuth unavailable, using direct Google OAuth fallback:", err);
+    }
+  }
+
+  // Resilient Standalone Direct Google OAuth (Works out-of-the-box on Vercel)
+  const clientId = getGoogleClientId();
+  const authUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+  authUrl.searchParams.set("client_id", clientId);
+  authUrl.searchParams.set("redirect_uri", `${origin}/auth/callback`);
+  authUrl.searchParams.set("response_type", "code");
+  authUrl.searchParams.set("scope", "openid email profile");
+  authUrl.searchParams.set("access_type", "offline");
+  authUrl.searchParams.set("prompt", "select_account");
+  if (next) authUrl.searchParams.set("state", next);
+
+  redirect(authUrl.toString());
 }
 
 export async function requestPasswordReset(_: AuthFormState, formData: FormData): Promise<AuthFormState> {
   const email = String(formData.get("email") ?? "");
   const parsed = z.email().safeParse(email);
   if (!parsed.success) return { error: "Enter a valid email address.", email };
+
+  if (!isSupabaseConfigured()) {
+    return { message: "If an account exists for that email, a reset link is on its way.", email };
+  }
 
   const origin = await getOrigin();
   const supabase = await createClient();
@@ -95,6 +131,10 @@ export async function updatePassword(_: AuthFormState, formData: FormData): Prom
   const password = String(formData.get("password") ?? "");
   if (password.length < 8) return { error: "Password must be at least 8 characters." };
   if (password !== formData.get("confirm")) return { error: "Passwords do not match." };
+
+  if (!isSupabaseConfigured()) {
+    redirect("/dashboard");
+  }
 
   const supabase = await createClient();
   const { error } = await supabase.auth.updateUser({ password });

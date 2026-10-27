@@ -4,6 +4,7 @@ import { PricingTabs } from "@/components/landing/pricing-tabs";
 import { Alert, buttonClass, Card, cn } from "@/components/ui";
 import { getProfile } from "@/lib/auth";
 import type { CreditTransaction, TransactionType } from "@/lib/database.types";
+import { isHostedSupabaseConfigured } from "@/lib/oauth-config";
 import { formatPrice, getPlan, getTopUpPack, TOPUP_PACKS } from "@/lib/plans";
 import { createClient } from "@/lib/supabase/server";
 import { saveAutoTopUp } from "./actions";
@@ -35,6 +36,8 @@ const STATUS_TEXT = {
   canceled: "Cancelled",
   inactive: "No plan",
 } as const;
+
+type Profile = Awaited<ReturnType<typeof getProfile>>;
 
 function CurrentPlan({ profile }: { profile: Profile }) {
   const plan = getPlan(profile.subscription_tier);
@@ -116,8 +119,6 @@ function CurrentPlan({ profile }: { profile: Profile }) {
     </div>
   );
 }
-
-type Profile = Awaited<ReturnType<typeof getProfile>>;
 
 function AutoTopUp({ profile }: { profile: Profile }) {
   const current = getTopUpPack(profile.auto_topup_pack);
@@ -238,13 +239,22 @@ function Ledger({ transactions }: { transactions: CreditTransaction[] }) {
 
 async function BillingContent({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
   const [params, profile] = await Promise.all([searchParams, getProfile()]);
-  const supabase = await createClient();
-  const { data: transactions } = await supabase
-    .from("credit_transactions")
-    .select("*")
-    .eq("user_id", profile.id)
-    .order("created_at", { ascending: false })
-    .limit(100);
+  let transactions: CreditTransaction[] = [];
+
+  if (isHostedSupabaseConfigured()) {
+    try {
+      const supabase = await createClient();
+      const { data } = await supabase
+        .from("credit_transactions")
+        .select("*")
+        .eq("user_id", profile.id)
+        .order("created_at", { ascending: false })
+        .limit(100);
+      if (data) transactions = data;
+    } catch {
+      // Supabase unavailable in standalone mode
+    }
+  }
 
   const error = typeof params.error === "string" ? ERRORS[params.error] : undefined;
   const activeTier = ["active", "trialing", "past_due"].includes(profile.subscription_status) ? profile.subscription_tier : null;
@@ -266,7 +276,7 @@ async function BillingContent({ searchParams }: { searchParams: Promise<Record<s
         </div>
         <PricingTabs checkout activeTier={activeTier} />
       </section>
-      <Ledger transactions={transactions ?? []} />
+      <Ledger transactions={transactions} />
     </div>
   );
 }
